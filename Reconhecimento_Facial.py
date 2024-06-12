@@ -8,14 +8,16 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 import base64
 from io import BytesIO
+import threading
 
-# Carregar o modelo pré-treinado
-model = InceptionResnetV1(pretrained='vggface2').eval()
-# Inicializar o aplicativo do Firebase
-cred = credentials.Certificate("D:/Users/User/Documents/Reconhecimento_Facial_Firebase_AdminSDK.json")
-firebase_admin.initialize_app(cred)
-db = firestore.client()
-pessoas_ref = db.collection('Pessoas')
+# Variáveis globais
+model = None
+db = None
+pessoas_ref = None
+descritores = []
+nomes = []
+knn = None
+dados_carregados = False
 
 # Função para extrair vetor descritor
 def extrair_vetor_descritor(imagem):
@@ -35,31 +37,46 @@ def extrair_vetor_descritor(imagem):
         vetor_descritor = model(img_tensor).numpy().flatten()
     return vetor_descritor
 
-pessoas = pessoas_ref.stream()
-descritores = []
-nomes = []
-knn = None  # Definir knn globalmente
+# Função para carregar dados do Firebase em uma thread separada
+def carregar_dados():
+    global model, db, pessoas_ref, descritores, nomes, knn, dados_carregados
 
-# Verificar se existem documentos na coleção
-if any(True for _ in pessoas):
-    # Itera sobre documentos da coleção no BD
-    for doc in pessoas:  # Obtém novamente, pois o stream foi consumido pela verificação anterior
-        nome_celebridade = doc.id
-        imagem_base64 = doc.to_dict().get('ImagemBase64')
-        if imagem_base64:
-            # Decodifica a imagem Base64 para obter os dados binários da imagem
-            dados_imagem = base64.b64decode(imagem_base64)
-            vetor_descritor = extrair_vetor_descritor(BytesIO(dados_imagem))
-            if vetor_descritor is not None:
-                descritores.append(vetor_descritor)
-                nomes.append(nome_celebridade)
+    # Carregar o modelo pré-treinado
+    model = InceptionResnetV1(pretrained='vggface2').eval()
+    # Inicializar o aplicativo do Firebase
+    cred = credentials.Certificate("D:/Users/User/Documents/Reconhecimento_Facial_Firebase_AdminSDK.json")
+    firebase_admin.initialize_app(cred)
+    db = firestore.client()
+    pessoas_ref = db.collection('Pessoas')
 
-    # Ajustar o modelo Nearest Neighbors apenas se houver descritores
-    if descritores:
-        knn = NearestNeighbors(n_neighbors=1, algorithm='auto')
-        knn.fit(descritores, nomes)
-else:
-    print("A coleção 'Pessoas' está vazia ou não existe.")
+    pessoas = list(pessoas_ref.stream())
+    # Verificar se existem documentos na coleção
+    if pessoas:
+        # Itera sobre documentos da coleção no BD
+        for doc in pessoas:
+            nome_celebridade = doc.id
+            print(nome_celebridade)  # Printar o nome do documento
+            imagem_base64 = doc.to_dict().get('ImagemBase64')
+            if imagem_base64:
+                # Decodifica a imagem Base64 para obter os dados binários da imagem
+                dados_imagem = base64.b64decode(imagem_base64)
+                vetor_descritor = extrair_vetor_descritor(BytesIO(dados_imagem))
+                if vetor_descritor is not None:
+                    descritores.append(vetor_descritor)
+                    nomes.append(nome_celebridade)
+
+        # Ajustar o modelo Nearest Neighbors apenas se houver descritores
+        if descritores:
+            knn = NearestNeighbors(n_neighbors=1, algorithm='auto')
+            knn.fit(descritores, nomes)
+    else:
+        print("A coleção 'Pessoas' está vazia ou não existe.")
+    
+    dados_carregados = True
+
+# Iniciar a thread para carregar dados
+thread_carregar_dados = threading.Thread(target=carregar_dados)
+thread_carregar_dados.start()
 
 # Função para incluir uma nova pessoa no banco de dados
 def incluir_pessoa(nome, imagem_base64):
@@ -89,12 +106,10 @@ def incluir_pessoa(nome, imagem_base64):
 def reconhecimento_facial_com_imagem(imagem):
     global knn  # Referenciar a variável global knn
     
-    # Referência para a coleção 'Pessoas'
-    pessoas_ref = db.collection('Pessoas')
-    if not pessoas_ref.get():
-        # Se a coleção não existir, retorna true para novo_identificado
-        novo_identificado = True
-        return None, None, novo_identificado, Image.open(imagem), None 
+    # Certifique-se de que os dados foram carregados
+    if not dados_carregados:
+        print("Dados ainda não foram carregados. Por favor, aguarde.")
+        return None, None, False, None, None
 
     vetor_descritor_desconhecido = extrair_vetor_descritor(imagem)
     if vetor_descritor_desconhecido is None:
@@ -126,6 +141,3 @@ def reconhecimento_facial_com_imagem(imagem):
     img_teste = Image.open(imagem)
 
     return nome_identificado, score_similaridade, novo_identificado, img_teste, img_identificada
-
-
-
